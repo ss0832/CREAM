@@ -1,0 +1,75 @@
+name: Python CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_LOG: warn
+
+jobs:
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: pip install ruff mypy numpy
+
+      - name: Ruff check
+        run: ruff check python/ tests_python/
+
+      - name: Ruff format check
+        run: ruff format --check python/ tests_python/
+
+      - name: Mypy (cream package)
+        run: mypy python/cream/ --ignore-missing-imports
+
+  test:
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin pytest numpy
+          pip install ase || true  # optional, tests skip if not installed
+
+      - name: Build Python extension
+        run: |
+          source .venv/bin/activate
+          maturin develop --features python
+        env:
+          # PyO3 0.21 caps at 3.12; forward-compat ABI lets 3.13+ build unchanged.
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+
+      - name: Run pytest
+        run: |
+          source .venv/bin/activate
+          pytest tests_python/ -v --tb=short

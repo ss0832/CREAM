@@ -1,0 +1,21 @@
+[package]
+name        = "cream-cli"
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["ss0832"]
+description = "CLI frontend for the CREAM EAM molecular dynamics engine"
+license     = "MIT"
+repository  = "https://github.com/ss0832/cream"
+
+[[bin]]
+name = "cream"
+path = "src/main.rs"
+
+[dependencies]
+cream    = { path = ".." }
+clap     = { version = "=4.4.18", features = ["derive"] }
+serde    = { version = "1", features = ["derive"] }
+serde_json = "=1.0.114"
+pollster = { workspace = true }
+log      = { workspace = true }
+env_logger = { workspace = true }

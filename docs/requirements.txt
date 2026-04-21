@@ -1,0 +1,10 @@
+# Read the Docs build dependencies for the CREAM documentation.
+#
+# Pin exact versions so RTD builds are reproducible.  Bump when you want
+# newer theme features or bug fixes.
+
+sphinx==7.3.7
+myst-parser==3.0.1
+furo==2024.8.6
+sphinx-copybutton==0.5.2
+linkify-it-py==2.0.3

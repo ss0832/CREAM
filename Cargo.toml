@@ -1,0 +1,110 @@
+[workspace]
+members  = [".", "cream-cli"]
+resolver = "2"
+
+[workspace.dependencies]
+wgpu      = "22"
+bytemuck  = { version = "1", features = ["derive"] }
+thiserror = "1"
+pollster  = "0.3"
+log       = "0.4"
+env_logger = "0.11"
+indexmap = "=2.2.6"
+rayon     = "1"
+
+# ─────────────────────────────────────────────
+[package]
+name        = "cream"
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["ss0832"]
+description = "Compute-shader Rust EAM Atomistics — GPU-accelerated molecular dynamics engine"
+license     = "MIT"
+repository  = "https://github.com/ss0832/cream"
+# Files excluded from `maturin sdist` / `cargo package`.
+# Benchmark scripts, sample potential files, and scratch files are not
+# needed by downstream users who build from the source distribution.
+exclude = [
+    "bench_*.py",
+    "*.alloy",
+    "src/*.bak",
+    "examples/wasm_demo",
+    "cream-cli",
+    ".github",
+]
+
+[lib]
+name       = "cream"
+crate-type = ["cdylib", "rlib"]
+
+# ── Binary targets ────────────────────────────────────────────────────────────
+# `profile_gpu` uses a pre-beta.10 bind-group layout (no pass0d reorder, no
+# debug-flags binding) and is incompatible with the current shader set.
+# We keep it in the tree as historical reference but require an explicit
+# feature flag so it is skipped by the default `cargo build` / `maturin build`.
+# To run it, first update its BGL to match engine.rs, then:
+#   cargo run --release --bin profile_gpu --features profile-gpu-bin
+[[bin]]
+name              = "profile_gpu"
+path              = "src/bin/profile_gpu.rs"
+required-features = ["profile-gpu-bin"]
+
+[dependencies]
+wgpu      = { workspace = true }
+bytemuck  = { workspace = true }
+thiserror = { workspace = true }
+pollster  = { workspace = true }
+rayon     = { workspace = true }
+log       = { workspace = true }
+env_logger = { workspace = true }
+indexmap = "=2.2.6"
+
+[dependencies.pyo3]
+version  = "0.21"
+features = ["extension-module"]
+optional = true
+
+[dependencies.numpy]
+version  = "0.21"
+optional = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu                 = { workspace = true, features = ["webgpu"] }
+wasm-bindgen         = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys               = "0.3"
+serde                = { version = "1", features = ["derive"] }
+serde-wasm-bindgen   = "0.6"
+# wgpu's rand/nonce deps need the "js" feature under wasm32
+getrandom            = { version = "0.2", features = ["js"] }
+
+[features]
+# Enable the legacy profile_gpu binary (requires its BGL to be brought up to
+# date with the current shaders — see src/bin/profile_gpu.rs top comment).
+profile-gpu-bin = []
+# Expose the legacy O(N²) neighbour-list builder (`neighbor_list::build_n2`).
+# The default O(N) builder always falls back to the same code for degenerate
+# inputs, so this feature is only needed to invoke the quadratic path directly
+# from diagnostic / fuzz tests.
+legacy_n2_nl = []
+# Route `NeighborStrategy::CellList` through the fully GPU-resident cell-list
+# pipeline (`pass0a..pass0d` + `pass1_cellist` + `pass2_cellist`).  Enabled by
+# default because it delivers the best performance on modern desktop GPUs and
+# has been validated against the O(N²) reference across every supported
+# crystal system up to N ≈ 1.6 × 10⁷.
+#
+# To opt out and use the CPU-built CSR neighbour list instead (smaller GPU
+# footprint, fewer moving parts — useful when porting to an unusual backend):
+#
+#     cargo build --no-default-features
+#     # or, combined with the Python bindings:
+#     cargo build --no-default-features --features python
+cellist_gpu = []
+default = ["cellist_gpu"]
+# PyO3 / NumPy bindings.  Enable with `--features python` when building via
+# maturin; independent of the cellist_gpu switch above.
+python       = ["dep:pyo3", "dep:numpy"]
+test-helpers = []  # Enable test helper functions (not needed for production builds)
+
+[dev-dependencies]
+approx   = "0.5"

@@ -1,0 +1,100 @@
+[build-system]
+requires      = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "cream-python"
+version = "0.1.0"
+description = "Compute-shader Rust EAM Atomistics — GPU-accelerated molecular dynamics force engine"
+requires-python = ">=3.9"
+authors = [{ name = "ss0832", email = "highlighty876@gmail.com" }]
+# Dual-licensed.  The Rust engine, PyO3 bindings, shaders, and documentation
+# are MIT.  The ASE `Calculator` subclass in `python/cream/calculator.py` is
+# LGPL-3.0-or-later because it derives from ASE.  See LICENSE / LICENSE.LGPL.
+license = "MIT AND LGPL-3.0-or-later"
+license-files = ["LICENSE", "LICENSE.LGPL"]
+readme = "README.md"
+keywords = ["molecular-dynamics", "eam", "gpu", "webgpu", "ase", "atomistics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+# ASE is a required dependency: `cream.CreamCalculator` subclasses
+# `ase.calculators.calculator.Calculator`, so importing the package without
+# ASE installed fails.  We therefore install it as a runtime requirement
+# rather than as an optional extra.
+dependencies = [
+    "numpy>=1.21",
+    "ase>=3.22",
+]
+
+[project.optional-dependencies]
+dev  = ["pytest>=7"]
+lint = ["ruff>=0.4", "mypy>=1.10"]
+
+[project.urls]
+Homepage      = "https://github.com/ss0832/cream"
+Repository    = "https://github.com/ss0832/cream"
+Documentation = "https://cream.readthedocs.io/"
+Issues        = "https://github.com/ss0832/cream/issues"
+
+[tool.maturin]
+# Features passed to `cargo build` when PyPI users run `pip install cream-python`
+# (which builds the sdist locally via this pyproject.toml as the build backend).
+#
+# - `python` enables the PyO3 bindings themselves; without it the crate
+#   compiles as a pure Rust library with no Python module.
+# - `cellist_gpu` routes `NeighborStrategy::CellList` through the fully
+#   GPU-resident cell-list pipeline (`pass0a..pass0d` + `pass1/pass2_cellist`).
+#   It is redundant with the Cargo-level `default = ["cellist_gpu"]` but is
+#   listed explicitly here so the Python-wheel build is unaffected if the
+#   Cargo default is ever changed.
+#
+# A user with no GPU still gets a fully functional CPU backend — the
+# `cellist_gpu` feature controls only the GPU path selection inside the
+# engine, not whether GPU code is compiled in.  Select the CPU path at
+# runtime with `backend="cpu"`.
+features         = ["python", "cellist_gpu"]
+python-source    = "python"
+module-name      = "cream._cream"
+# Strip debug symbols from the release .so to reduce wheel size.
+strip            = true
+# Explicitly include the tests and type stubs in the sdist so that
+# downstream users can run `pytest` after `pip install cream-python[dev]`.
+sdist-include    = [
+    "tests_python/**/*",
+    "python/cream/py.typed",
+    "python/cream/_cream.pyi",
+    "Cargo.lock",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version       = "3.9"
+warn_return_any      = true
+warn_unused_configs  = true
+ignore_missing_imports = true
+# Exclude auto-generated/system stubs that can break type checking in CI.
+exclude              = ["build/", "dist/", "target/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests_python"]

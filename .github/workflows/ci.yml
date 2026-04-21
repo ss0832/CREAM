@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_LOG: warn
+
+jobs:
+  # ── Standard CPU tests (all platforms) ──────────────────────────────
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unit + CPU tests
+        run: cargo test --workspace --lib -- --skip gpu_
+      - name: Integration tests (no GPU)
+        run: cargo test --workspace --test '*' -- --skip gpu_
+
+  # ── GPU tests: Mesa lavapipe software Vulkan (no physical GPU required) ─────────
+  #
+  # lavapipe (llvmpipe/LLVM) fully implements Vulkan 1.3 on CPU.
+  # VK_EXT_calibrated_timestamps and TIMESTAMP_QUERY_INSIDE_ENCODERS are enabled,
+  # allowing per-pass GPU timestamps via the profile_gpu binary.
+  # Correctness tests (forces, energy conservation, Newton's third law) are backend-independent.
+  gpu-software:
+    name: GPU tests (lavapipe software Vulkan)
+    runs-on: ubuntu-latest
+    env:
+      WGPU_BACKEND: vulkan
+      XDG_RUNTIME_DIR: /tmp
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Mesa lavapipe + Vulkan loader
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools
+          vulkaninfo --summary 2>/dev/null \
+            | grep -E "deviceName|driverName|deviceType" || true
+
+      - name: Build release binaries
+        run: cargo build --release --bin profile_gpu --bin bench_gpu
+
+      # Enable #[ignore = "requires GPU"] with --include-ignored
+      - name: GPU unit tests — lib (lavapipe)
+        run: |
+          cargo test --lib --release -- \
+            --include-ignored \
+            gpu_engine_init \
+            gpu_forces_finite \
+            gpu_vs_cpu_accuracy \
+            gpu_frame_cache_reuse \
+            gpu_newton_third_law \
+            gpu_energy_per_atom_consistency
+
+      - name: GPU integration tests — phase2_gpu (lavapipe)
+        run: cargo test --release --test phase2_gpu -- --include-ignored
+
+      - name: GPU integration tests — phase3_cell_list (lavapipe)
+        run: cargo test --release --test phase3_cell_list -- --include-ignored
+
+      - name: Per-pass GPU profiler (profile_gpu)
+        run: ./target/release/profile_gpu 2>/dev/null | tee gpu_profile_output.txt
+
+      - name: Upload profiler results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-profile-lavapipe-${{ github.sha }}
+          path: gpu_profile_output.txt
+          retention-days: 30
+
+      - name: GPU benchmark (bench_gpu)
+        run: ./target/release/bench_gpu 2>/dev/null | tee gpu_bench_output.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-bench-lavapipe-${{ github.sha }}
+          path: gpu_bench_output.txt
+          retention-days: 30
+
+  # ── GPU tests: physical GPU (self-hosted runner) ────────────────────────────
+  # Trigger: workflow_dispatch or schedule only
+  # Required labels: [self-hosted, gpu]
+  # Requirements: Vulkan 1.1+ compatible GPU + driver
+  gpu-hardware:
+    name: GPU tests (physical GPU, self-hosted)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: [self-hosted, gpu]
+    env:
+      XDG_RUNTIME_DIR: /tmp
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: GPU info
+        run: |
+          vulkaninfo --summary 2>/dev/null \
+            | grep -E "deviceName|driverName|deviceType|apiVersion" || true
+
+      - name: Build release
+        run: cargo build --release --bin profile_gpu --bin bench_gpu
+
+      - name: GPU correctness tests (physical GPU)
+        run: |
+          cargo test --lib --release -- --include-ignored gpu_
+          cargo test --release --test phase2_gpu -- --include-ignored
+          cargo test --release --test phase3_cell_list -- --include-ignored
+
+      - name: Per-pass profiler (physical GPU)
+        run: ./target/release/profile_gpu 2>/dev/null | tee gpu_profile_hw.txt
+
+      - name: Benchmark (physical GPU)
+        run: ./target/release/bench_gpu 2>/dev/null | tee gpu_bench_hw.txt
+
+      - name: Upload hardware results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-hardware-${{ github.sha }}
+          path: |
+            gpu_profile_hw.txt
+            gpu_bench_hw.txt
+          retention-days: 90
+
+  # ── WASM build ──────────────────────────────────────────────────────────────
+  wasm:
+    name: WASM build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: wasm-pack build
+        run: wasm-pack build --target web
+
+  # ── Miri (undefined behavior detection) ──────────────────────────────────
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: Miri test (lib only, no GPU)
+        run: cargo miri test --lib -- --skip gpu_
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+          RUSTUP_TOOLCHAIN: nightly

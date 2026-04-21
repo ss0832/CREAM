@@ -53,7 +53,7 @@ engine (CREAM's `atom_types` indices are 0-based into that order).
 ## Quick start — Python + ASE
 
 ```bash
-pip install cream-python
+pip install eam-cream-python
 ```
 
 CREAM is distributed on PyPI as a **source distribution** (sdist) built
@@ -355,8 +355,8 @@ twine upload target/wheels/cream_python-*.tar.gz
 (`python,cellist_gpu`), so no `--features` flag is needed at release
 time.
 
-The package name on PyPI is **`cream-python`**. Install with
-`pip install cream-python`; import as `from cream import ...`.
+The package name on PyPI is **`eam-cream-python`**. Install with
+`pip install eam-cream-python`; import as `from cream import ...`.
 
 ## Benchmarking and diagnostics
 

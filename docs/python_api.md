@@ -1,6 +1,6 @@
 # Python API
 
-The `cream-python` package exposes two objects:
+The `eam-cream-python` package exposes two objects:
 
 - **`cream.CreamCalculator`** — an ASE `Calculator` subclass, the
   recommended entry point for most simulation workflows.

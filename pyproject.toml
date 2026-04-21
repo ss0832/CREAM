@@ -3,7 +3,7 @@ requires      = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "cream-python"
+name = "eam-cream-python"
 version = "0.1.0"
 description = "Compute-shader Rust EAM Atomistics — GPU-accelerated molecular dynamics force engine"
 requires-python = ">=3.9"

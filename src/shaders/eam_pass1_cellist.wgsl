@@ -34,7 +34,7 @@
 //   5. Each active thread accumulates ρᵢ against the tile atoms within cutoff.
 //
 // Self-exclusion: atom_k == k (both are Morton indices after reordering).
-// Kahan compensated summation suppresses f32 round-off.
+// Neumaier compensated summation suppresses f32 round-off.
 // =============================================================================
 
 // ── Debug mode toggle ──────────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ fn main(
                                params.n_cells_y_pad - 1u,
                                params.n_cells_z_pad - 1u) + 1u;
 
-    // ── Kahan compensated accumulator for rho_i ───────────────────────────────
+    // ── Neumaier compensated accumulator for rho_i ───────────────────────────────
     var rho: f32 = 0.0;
     var kc:  f32 = 0.0;
 
@@ -295,11 +295,12 @@ fn main(
                                 if ENABLE_DEBUG {
                                     atomicAdd(&dbg[18], 1u);
                                 }
-                                let r = sqrt(r_sq);
-                                let y = lookup_by_r(tbl.rho_offset, tile_type[tj], r) - kc;
-                                let t = rho + y;
-                                kc    = (t - rho) - y;
-                                rho   = t;
+                                let r    = sqrt(r_sq);
+                                let _val = lookup_by_r(tbl.rho_offset, tile_type[tj], r);
+                                let t    = rho + _val;
+                                if abs(rho) >= abs(_val) { kc += (rho - t) + _val; }
+                                else                     { kc += (_val - t) + rho; }
+                                rho = t;
                             }
                         }
                     }
@@ -314,6 +315,6 @@ fn main(
         if ENABLE_DEBUG && (!(rho == rho) || rho > 1e30 || rho < -1e30) {
             atomicAdd(&dbg[5], 1u);
         }
-        densities[k] = rho;   // Morton order: consumed by pass2_cellist as densities_in[k]
+        densities[k] = rho + kc;   // Morton order: consumed by pass2_cellist as densities_in[k]
     }
 }

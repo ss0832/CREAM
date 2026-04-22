@@ -65,7 +65,7 @@ type XyzParseResult =
 #[derive(Parser)]
 #[command(
     name    = "cream",
-    version = "0.1.0",
+    version = "0.1.1",
     author  = "ss0832",
     about   = "Compute-shader Rust EAM Atomistics — GPU-accelerated force/energy calculator",
     long_about = None,

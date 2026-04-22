@@ -38,7 +38,17 @@ fn main(
     let count = reduce_params.count;
 
     // Load: threads beyond `count` contribute 0 (identity for addition).
-    wg_data[lid] = select(0.0, input[gid.x], gid.x < count);
+    //
+    // Use an explicit if-guard rather than `select(0.0, input[gid.x], cond)`.
+    // In WGSL, select() evaluates both operands eagerly before choosing one,
+    // so `input[gid.x]` would be read even when `gid.x >= count`, which is
+    // an out-of-bounds access (the input buffer has exactly `count` elements).
+    // WebGPU's robustness rules return 0 for OOB reads, but native backends
+    // without robustness exhibit undefined behaviour.  The if-guard prevents
+    // the read entirely.
+    var v: f32 = 0.0;
+    if gid.x < count { v = input[gid.x]; }
+    wg_data[lid] = v;
     workgroupBarrier();
 
     // Binary tree reduction within workgroup.

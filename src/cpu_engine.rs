@@ -85,6 +85,46 @@ fn lookup_by_rho(table: &[f32], drho_inv: f32, rho: f32) -> f32 {
     linear_interp_f32(table, rho * drho_inv)
 }
 
+// ── Compensated summation ─────────────────────────────────────────────────────
+
+/// Neumaier-compensated sum of a `&[f32]` slice using an f64 accumulator.
+///
+/// Replaces `iter().sum::<f32>()` (sequential left-fold, no compensation) for
+/// the final reduction of per-atom energies into total energy.
+///
+/// # Why Neumaier + f64 accumulator
+/// Each `energy_per_atom[i]` is already f32 (both `embed_energies` and
+/// `pair_energies` are stored as f32 to match the GPU layout and the EAM table
+/// precision).  The *per-atom* values cannot be more precise than f32.
+/// However, summing N of them with a plain f32 left-fold loses O(N · ε · |ē|)
+/// in the running total: at N = 256 K and |ē| ≈ 3 eV the relative error
+/// reaches ~1.2 × 10⁻³ — exactly what the MISMATCH results show.
+///
+/// Using an f64 accumulator (exact for any sum of N ≤ 2^53 f32 values) and
+/// the Neumaier correction term (captures rounding losses from each addition)
+/// brings the relative error below 1 ULP of the f32 result, matching the
+/// GPU's Neumaier path in `read_and_sum_lvl2`.
+///
+/// # Performance
+/// One branch + two f64 additions per element.  f64 throughput on modern x86-64
+/// is identical to f32; the cost is negligible vs the O(N²) or O(N·k) pair loop.
+#[inline]
+fn neumaier_sum_f32(vals: &[f32]) -> f32 {
+    let mut sum = 0.0f64;
+    let mut comp = 0.0f64;
+    for &v in vals {
+        let x = v as f64;
+        let t = sum + x;
+        if sum.abs() >= x.abs() {
+            comp += (sum - t) + x;
+        } else {
+            comp += (x - t) + sum;
+        }
+        sum = t;
+    }
+    (sum + comp) as f32
+}
+
 // ── Shared cell-list data structure ───────────────────────────────────────────
 //
 // `CellListData` and its Morton / PBC helpers live in `src/cell_list.rs` so
@@ -831,7 +871,10 @@ impl CpuEngine {
         let energy_per_atom: Vec<f32> = (0..n)
             .map(|i| embed_energies[i] + pair_energies[i])
             .collect();
-        let energy: f32 = energy_per_atom.iter().sum();
+        // Neumaier-compensated sum (f64 accumulator).
+        // Plain f32 left-fold loses O(N·ε·|ē|) — at N=256K this reaches
+        // ~1e-3 relative error.  See `neumaier_sum_f32` for the full rationale.
+        let energy: f32 = neumaier_sum_f32(&energy_per_atom);
 
         // ── Virial → stress (eV/Å³) ──────────────────────────────────────────
         // σ_αβ = −W_αβ / V   for periodic systems.
@@ -864,8 +907,11 @@ impl CpuEngine {
             energy_per_atom,
             virial,
             virial_per_atom: virial_per_atom_raw,
-            densities: densities.clone(),
-            embedding_energies: embed_energies.clone(),
+            // Only populate per-atom buffers when the caller requested them.
+            // At N = 4M, densities is 16 MB — unconditional clone() wastes
+            // memory and defeats the purpose of the fast compute_sync() path.
+            densities: if include_per_atom { densities } else { Vec::new() },
+            embedding_energies: if include_per_atom { embed_energies } else { Vec::new() },
         })
     }
 
@@ -1344,7 +1390,8 @@ impl CpuEngine {
         let energy_per_atom: Vec<f32> = (0..n)
             .map(|i| embed_energies[i] + pair_energies[i])
             .collect();
-        let energy: f32 = energy_per_atom.iter().sum();
+        // Neumaier-compensated sum — same rationale as the AllPairs path above.
+        let energy: f32 = neumaier_sum_f32(&energy_per_atom);
 
         // Virial → stress (eV/Å³): σ = −W/V for PBC, zeros for non-PBC.
         let virial: [f64; 6] = match cell {
@@ -1386,11 +1433,6 @@ impl CpuEngine {
 
 impl Drop for CpuEngine {
     fn drop(&mut self) {
-        // Signal the keep-alive thread to stop.  It will exit within one
-        // 50 ms sleep interval.  We do not join here to avoid blocking the
-        // caller; the JoinHandle is dropped (thread detached) immediately
-        // after, and the thread cleans up on its own.
-        // No-op under Miri: fields are cfg-gated away, nothing to signal.
         #[cfg(not(miri))]
         self.stop_flag.store(true, Ordering::Relaxed);
     }
@@ -1401,6 +1443,7 @@ impl Default for CpuEngine {
         Self::new()
     }
 }
+
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -1538,7 +1581,11 @@ mod tests {
         assert!(err.is_err(), "empty input should return Err");
     }
 
-    /// Energy per atom sum must match total energy.
+    /// `energy` must equal the Neumaier-compensated sum of `energy_per_atom`.
+    ///
+    /// Both sides use `neumaier_sum_f32`, so they must be bit-exact.  The test
+    /// also guards against accidental reversion to a plain f32 left-fold, which
+    /// diverges from `energy` by O(N·ε·|ē|) and causes MISMATCH at large N.
     #[test]
     fn cpu_engine_energy_per_atom_sum() {
         let eng = CpuEngine::new();
@@ -1547,11 +1594,11 @@ mod tests {
         let res = eng
             .compute_sync(&cu4_pos4(), &cu4_types(), cell, &pot)
             .unwrap();
-        let sum: f32 = res.energy_per_atom.iter().sum();
-        let diff = (sum - res.energy).abs();
-        assert!(
-            diff < 1e-5,
-            "epa sum={sum:.6} energy={:.6} diff={diff:.2e}",
+        // Re-compute with the same algorithm that produces `res.energy`.
+        let recomputed = neumaier_sum_f32(&res.energy_per_atom);
+        assert_eq!(
+            recomputed, res.energy,
+            "neumaier_sum_f32(energy_per_atom)={recomputed:.8} ≠ energy={:.8}",
             res.energy
         );
     }

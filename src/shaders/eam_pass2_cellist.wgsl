@@ -194,13 +194,13 @@ fn main(
                                params.n_cells_y_pad - 1u,
                                params.n_cells_z_pad - 1u) + 1u;
 
-    // ── Kahan compensated force / energy accumulators ─────────────────────────
+    // ── Neumaier compensated force / energy accumulators ─────────────────────────
     var kc_fx: f32 = 0.0;
     var kc_fy: f32 = 0.0;
     var kc_fz: f32 = 0.0;
     var kc_e:  f32 = 0.0;
 
-    // ── Kahan compensated per-thread virial accumulators (Voigt order) ────────
+    // ── Neumaier compensated per-thread virial accumulators (Voigt order) ────────
     var vxx: f32 = 0.0;   var kc_vxx: f32 = 0.0;
     var vyy: f32 = 0.0;   var kc_vyy: f32 = 0.0;
     var vzz: f32 = 0.0;   var kc_vzz: f32 = 0.0;
@@ -303,10 +303,10 @@ fn main(
                                 let coeff   = dF_i * df_beta_dr + dF_j * df_alpha_dr + dphi_dr;
                                 let contrib = coeff * r_hat;
 
-                                { let y = contrib.x - kc_fx; let t2 = force.x + y; kc_fx = (t2 - force.x) - y; force.x = t2; }
-                                { let y = contrib.y - kc_fy; let t2 = force.y + y; kc_fy = (t2 - force.y) - y; force.y = t2; }
-                                { let y = contrib.z - kc_fz; let t2 = force.z + y; kc_fz = (t2 - force.z) - y; force.z = t2; }
-                                { let y = (0.5 * phi) - kc_e; let t2 = pair_energy + y; kc_e = (t2 - pair_energy) - y; pair_energy = t2; }
+                                { let _v = contrib.x;   let t2 = force.x + _v;       if abs(force.x)      >= abs(_v) { kc_fx  += (force.x      - t2) + _v; } else { kc_fx  += (_v - t2) + force.x;      } force.x      = t2; }
+                                { let _v = contrib.y;   let t2 = force.y + _v;       if abs(force.y)      >= abs(_v) { kc_fy  += (force.y      - t2) + _v; } else { kc_fy  += (_v - t2) + force.y;      } force.y      = t2; }
+                                { let _v = contrib.z;   let t2 = force.z + _v;       if abs(force.z)      >= abs(_v) { kc_fz  += (force.z      - t2) + _v; } else { kc_fz  += (_v - t2) + force.z;      } force.z      = t2; }
+                                { let _v = 0.5 * phi;   let t2 = pair_energy + _v;   if abs(pair_energy)  >= abs(_v) { kc_e   += (pair_energy  - t2) + _v; } else { kc_e   += (_v - t2) + pair_energy;  } pair_energy  = t2; }
 
                                 // Virial — half-pair factor 0.5 absorbed here.
                                 // Voigt order: xx, yy, zz, yz, xz, xy.
@@ -316,12 +316,12 @@ fn main(
                                 let wyz_c = -0.5 * dv.y * contrib.z;
                                 let wxz_c = -0.5 * dv.x * contrib.z;
                                 let wxy_c = -0.5 * dv.x * contrib.y;
-                                { let y = wxx_c - kc_vxx; let t2 = vxx + y; kc_vxx = (t2 - vxx) - y; vxx = t2; }
-                                { let y = wyy_c - kc_vyy; let t2 = vyy + y; kc_vyy = (t2 - vyy) - y; vyy = t2; }
-                                { let y = wzz_c - kc_vzz; let t2 = vzz + y; kc_vzz = (t2 - vzz) - y; vzz = t2; }
-                                { let y = wyz_c - kc_vyz; let t2 = vyz + y; kc_vyz = (t2 - vyz) - y; vyz = t2; }
-                                { let y = wxz_c - kc_vxz; let t2 = vxz + y; kc_vxz = (t2 - vxz) - y; vxz = t2; }
-                                { let y = wxy_c - kc_vxy; let t2 = vxy + y; kc_vxy = (t2 - vxy) - y; vxy = t2; }
+                                { let _v = wxx_c; let t2 = vxx + _v; if abs(vxx) >= abs(_v) { kc_vxx += (vxx - t2) + _v; } else { kc_vxx += (_v - t2) + vxx; } vxx = t2; }
+                                { let _v = wyy_c; let t2 = vyy + _v; if abs(vyy) >= abs(_v) { kc_vyy += (vyy - t2) + _v; } else { kc_vyy += (_v - t2) + vyy; } vyy = t2; }
+                                { let _v = wzz_c; let t2 = vzz + _v; if abs(vzz) >= abs(_v) { kc_vzz += (vzz - t2) + _v; } else { kc_vzz += (_v - t2) + vzz; } vzz = t2; }
+                                { let _v = wyz_c; let t2 = vyz + _v; if abs(vyz) >= abs(_v) { kc_vyz += (vyz - t2) + _v; } else { kc_vyz += (_v - t2) + vyz; } vyz = t2; }
+                                { let _v = wxz_c; let t2 = vxz + _v; if abs(vxz) >= abs(_v) { kc_vxz += (vxz - t2) + _v; } else { kc_vxz += (_v - t2) + vxz; } vxz = t2; }
+                                { let _v = wxy_c; let t2 = vxy + _v; if abs(vxy) >= abs(_v) { kc_vxy += (vxy - t2) + _v; } else { kc_vxy += (_v - t2) + vxy; } vxy = t2; }
                             }
                         }
                     }
@@ -346,17 +346,17 @@ fn main(
         if ENABLE_DEBUG && is_bad {
             atomicAdd(&dbg[13], 1u);
         }
-        forces_out[j] = vec4<f32>(force, 0.0);
+        forces_out[j] = vec4<f32>(force.x + kc_fx, force.y + kc_fy, force.z + kc_fz, 0.0);
     }
 
     // ── Workgroup energy + virial tree-reduction (same 6 barriers) ────────────
-    wg_energy[lid] = select(0.0, F_i + pair_energy, is_active);
-    wg_vxx[lid]    = select(0.0, vxx, is_active);
-    wg_vyy[lid]    = select(0.0, vyy, is_active);
-    wg_vzz[lid]    = select(0.0, vzz, is_active);
-    wg_vyz[lid]    = select(0.0, vyz, is_active);
-    wg_vxz[lid]    = select(0.0, vxz, is_active);
-    wg_vxy[lid]    = select(0.0, vxy, is_active);
+    wg_energy[lid] = select(0.0, F_i + pair_energy + kc_e,   is_active);
+    wg_vxx[lid]    = select(0.0, vxx + kc_vxx, is_active);
+    wg_vyy[lid]    = select(0.0, vyy + kc_vyy, is_active);
+    wg_vzz[lid]    = select(0.0, vzz + kc_vzz, is_active);
+    wg_vyz[lid]    = select(0.0, vyz + kc_vyz, is_active);
+    wg_vxz[lid]    = select(0.0, vxz + kc_vxz, is_active);
+    wg_vxy[lid]    = select(0.0, vxy + kc_vxy, is_active);
     workgroupBarrier();
 
     for (var stride = 32u; stride > 0u; stride >>= 1u) {

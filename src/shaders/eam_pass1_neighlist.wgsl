@@ -47,7 +47,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s = nl_starts[i];
     let e = nl_starts[i + 1u];
 
-    // Kahan-compensated accumulator
+    // Neumaier-compensated accumulator
     var rho: f32 = 0.0;
     var kc:  f32 = 0.0;
 
@@ -63,10 +63,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // guards against degenerate self/overlap pairs.
         if r_sq < params.cutoff_sq && r_sq > MIN_R_SQ {
             if ENABLE_DEBUG { atomicAdd(&dbg[7], 1u); }
-            let r = sqrt(r_sq);
-            let y = lookup_by_r(tbl.rho_offset, atom_types[j], r) - kc;
-            let t = rho + y;
-            kc = (t - rho) - y;
+            let r    = sqrt(r_sq);
+            let _val = lookup_by_r(tbl.rho_offset, atom_types[j], r);
+            let t    = rho + _val;
+            if abs(rho) >= abs(_val) { kc += (rho - t) + _val; }
+            else                     { kc += (_val - t) + rho; }
             rho = t;
         }
     }
@@ -75,5 +76,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicAdd(&dbg[5], 1u);
     }
 
-    densities[i] = rho;
+    densities[i] = rho + kc;
 }

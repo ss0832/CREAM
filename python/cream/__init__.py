@@ -21,5 +21,5 @@ Quick start::
 from cream._cream import CreamEngine  # noqa: F401
 from cream.calculator import CreamCalculator  # noqa: F401
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["CreamEngine", "CreamCalculator"]

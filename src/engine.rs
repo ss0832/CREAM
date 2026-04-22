@@ -486,16 +486,19 @@ struct FrameBuffers {
     density_buf: wgpu::Buffer, // f32 × n
     forces_buf: wgpu::Buffer,  // vec4<f32> × n
 
-    // 4-level energy reduction chain
+    // 3-level GPU energy reduction chain + CPU final sum
     //   pass2 (in-shader): N atoms → wg_energy_buf[ceil(N/64)]
     //   pass3a: wg_energy_buf → lvl1_buf[ceil(N/4096)]
     //   pass3b: lvl1_buf      → lvl2_buf[ceil(N/262144)]
-    //   pass3c: lvl2_buf      → energy_total_buf[1]   (1 workgroup)
-    //   Exact for N ≤ 64^4 = 16_777_216.
-    wg_energy_buf: wgpu::Buffer,    // ceil(N/64)
-    lvl1_buf: wgpu::Buffer,         // ceil(N/4096)
-    lvl2_buf: wgpu::Buffer,         // ceil(N/262144)
-    energy_total_buf: wgpu::Buffer, // 1
+    //   CPU:    Neumaier-compensated sum of lvl2_buf → scalar  (no upper N limit)
+    //
+    // pass3c (lvl2 → 1 workgroup) has been removed: it silently dropped
+    // elements when lvl2_count > 64 (i.e. N > 16_777_216 = 64^4), causing
+    // ~0.4 % energy under-estimation at N ≈ 23 M.  The CPU Neumaier sum
+    // costs < 1 µs even for very large N and has no correctness limit.
+    wg_energy_buf: wgpu::Buffer, // ceil(N/64)
+    lvl1_buf: wgpu::Buffer,      // ceil(N/4096)
+    lvl2_buf: wgpu::Buffer,      // ceil(N/262144)
 
     // Virial reduction — written by pass2 shader alongside wg_energy_buf.
     //
@@ -517,15 +520,14 @@ struct FrameBuffers {
 
     reduce_params_a_buf: wgpu::Buffer, // ReduceParams for pass3a
     reduce_params_b_buf: wgpu::Buffer, // ReduceParams for pass3b
-    reduce_params_c_buf: wgpu::Buffer, // ReduceParams for pass3c
 
     // Verlet MD
     velocities_buf: wgpu::Buffer,    // vec4<f32> × n  (init 0)
     verlet_params_buf: wgpu::Buffer, // VerletParams (16 B)
 
-    // Readback (forces + total energy only — no energy_per_atom)
-    rb_forces: wgpu::Buffer,       // N × 16 B
-    rb_energy_total: wgpu::Buffer, // 4 B
+    // Readback (forces + lvl2 energy partials only — no energy_per_atom)
+    rb_forces: wgpu::Buffer, // N × 16 B
+    rb_lvl2: wgpu::Buffer,   // ceil(N/262144) × 4 B  — CPU-summed to get total energy
 
     // BindGroups
     bg_pass0a: Option<wgpu::BindGroup>,
@@ -537,7 +539,6 @@ struct FrameBuffers {
     bg_pass2: Option<(u64, wgpu::BindGroup)>,
     bg_pass3a: Option<wgpu::BindGroup>,
     bg_pass3b: Option<wgpu::BindGroup>,
-    bg_pass3c: Option<wgpu::BindGroup>,
     bg_verlet: Option<wgpu::BindGroup>,
 
     cell_list: Option<CellListBuffers>,
@@ -1671,16 +1672,13 @@ impl ComputeEngine {
         const REDUCE_SRC: &str = include_str!("shaders/eam_pass3_reduce.wgsl");
         Self::ensure_fixed_pipeline(&self.device, &mut self.pl_pass3, REDUCE_SRC, BGL_PASS3);
 
-        // 4-level reduction counts:
+        // 3-level GPU reduction counts (CPU handles the final sum):
         //   Level 0 (in pass2): N    → num_wg
         //   Level 1 (pass3a):   num_wg → lvl1_count
-        //   Level 2 (pass3b):   lvl1_count → lvl2_count
-        //   Level 3 (pass3c):   lvl2_count → 1  (must be ≤ 64)
+        //   Level 2 (pass3b):   lvl1_count → lvl2_count  (CPU-summed)
         let num_wg = n.div_ceil(64); // number of wg partial sums from pass2
         let lvl1_count = num_wg.div_ceil(64);
         let lvl2_count = lvl1_count.div_ceil(64);
-        // lvl2_count must be ≤ 64 for pass3c to fit in 1 workgroup.
-        // This is satisfied for N ≤ 64^4 = 16_777_216.
 
         let rp_a = ReduceParams {
             count: num_wg as u32,
@@ -1694,18 +1692,10 @@ impl ComputeEngine {
             _p1: 0,
             _p2: 0,
         };
-        let rp_c = ReduceParams {
-            count: lvl2_count as u32,
-            _p0: 0,
-            _p1: 0,
-            _p2: 0,
-        };
         self.queue
             .write_buffer(&fb.reduce_params_a_buf, 0, bytemuck::bytes_of(&rp_a));
         self.queue
             .write_buffer(&fb.reduce_params_b_buf, 0, bytemuck::bytes_of(&rp_b));
-        self.queue
-            .write_buffer(&fb.reduce_params_c_buf, 0, bytemuck::bytes_of(&rp_c));
 
         if fb.bg_pass3a.is_none() {
             let bgl = Self::make_bgl(&self.device, BGL_PASS3);
@@ -1728,18 +1718,6 @@ impl ComputeEngine {
                     (0, &fb.lvl1_buf),
                     (1, &fb.lvl2_buf),
                     (2, &fb.reduce_params_b_buf),
-                ],
-            ));
-        }
-        if fb.bg_pass3c.is_none() {
-            let bgl = Self::make_bgl(&self.device, BGL_PASS3);
-            fb.bg_pass3c = Some(Self::make_bind_group(
-                &self.device,
-                &bgl,
-                &[
-                    (0, &fb.lvl2_buf),
-                    (1, &fb.energy_total_buf),
-                    (2, &fb.reduce_params_c_buf),
                 ],
             ));
         }
@@ -1842,145 +1820,265 @@ impl ComputeEngine {
             // CPU-built NL path: pass0c / pass0d (Morton scatter + reorder) are skipped.
             // The CPU-built CSR neighbour list has already been uploaded above,
             // and the NL shaders read the original pos_buf / types_buf directly.
-            if cellist_gpu {
-                // pass0c: scatter
-                // Unlike pass1/pass2, pass0c/0d operate on atom indices in
-                // original order (not Morton), so i_offset/i_count stride the
-                // original array.  The per-chunk params built above are
-                // reusable because they only vary i_offset / i_count.
-                for c in 0..n_chunks {
-                    let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
-                    enc_b.copy_buffer_to_buffer(
-                        &chunk_staging,
-                        c as u64 * params_stride,
-                        &fb.params_buf,
-                        0,
-                        params_stride,
-                    );
-                    Self::encode_dispatch(
-                        &mut enc_b,
-                        self.pl_pass0c.as_ref().unwrap(),
-                        fb.bg_pass0c.as_ref().unwrap(),
-                        i_cnt,
-                    );
-                }
-                // pass0d: reorder positions/types into Morton order
-                for c in 0..n_chunks {
-                    let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
-                    enc_b.copy_buffer_to_buffer(
-                        &chunk_staging,
-                        c as u64 * params_stride,
-                        &fb.params_buf,
-                        0,
-                        params_stride,
-                    );
-                    Self::encode_dispatch(
-                        &mut enc_b,
-                        self.pl_pass0d.as_ref().unwrap(),
-                        fb.bg_pass0d.as_ref().unwrap(),
-                        i_cnt,
-                    );
-                }
-            }
+            //
+            // ── TDR-safe dispatch strategy ────────────────────────────────────
+            //
+            // n_chunks == 1  (N ≤ 4_194_240, typical MD sizes):
+            //   All passes stay in enc_b — single queue.submit(), no behaviour
+            //   change vs. previous releases.
+            //
+            // n_chunks > 1  (N > 4_194_240):
+            //   enc_b carries only the debug-flag clear and is flushed first.
+            //   Every subsequent pass is dispatched one chunk at a time in its
+            //   own CommandEncoder, immediately followed by device.poll(Wait).
+            //   This caps each GPU submission to ≤ 4_194_240 atoms (~400 ms on
+            //   the target hardware), well below the Windows TDR watchdog (2 s)
+            //   for any N — including theoretically unbounded system sizes.
+            //
+            // Correctness of the per-chunk split:
+            //   pass0c  — uses atomic write cursors; sequential chunk submission
+            //             with poll(Wait) ensures each chunk sees the cursor
+            //             state left by the previous one.  Total scatter result
+            //             is identical to a single monolithic dispatch.
+            //   pass0d  — reads sorted_atoms[] (fully committed after all
+            //             pass0c polls).  Chunks write non-overlapping
+            //             reordered_pos[i_offset .. i_offset+i_cnt] ranges;
+            //             no write conflicts between chunks.
+            //   pass1   — each chunk writes densities[i_offset .. i_offset+i_cnt]
+            //             only.  No intra-pass write conflicts.  poll(Wait) after
+            //             the last pass1 chunk ensures all density values are
+            //             visible in GPU memory before any pass2 chunk starts.
+            //   pass2   — each chunk writes forces[i_offset..] and
+            //             wg_energy_buf[(i_offset/64)..]; non-overlapping ranges.
+            //             poll(Wait) after each chunk bounds submission time.
+            //   pass3   — tree-reduces the complete wg_energy_buf (fully written
+            //             after all pass2 polls).  Result is bit-identical to
+            //             the single-encoder path.
+            //
+            // Overhead: (3 × n_chunks + 1) extra poll(Wait) calls.
+            // At N = 20 M (5 chunks) and ~2 ms per poll: ≈ 30 ms added to
+            // a ~4 s computation — under 1 %.
 
-            // Pass 1 — density — all chunks.
-            // All pass-1 chunks must complete before pass-2 reads densities[].
             let bg1 = &fb.bg_pass1.as_ref().unwrap().1;
-            for c in 0..n_chunks {
-                let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
-                enc_b.copy_buffer_to_buffer(
-                    &chunk_staging,
-                    c as u64 * params_stride,
-                    &fb.params_buf,
-                    0,
-                    params_stride,
-                );
-                Self::encode_dispatch(&mut enc_b, pl1, bg1, i_cnt);
-            }
-
-            // Pass 2 — forces — all chunks.
-            // Each chunk writes wg_energy_out[(i_offset/64) + wgid.x] so the
-            // ceil(N/64)-element wg_energy_buf is filled without overlap.
             let bg2 = &fb.bg_pass2.as_ref().unwrap().1;
-            for c in 0..n_chunks {
-                let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
-                enc_b.copy_buffer_to_buffer(
-                    &chunk_staging,
-                    c as u64 * params_stride,
-                    &fb.params_buf,
-                    0,
-                    params_stride,
-                );
-                Self::encode_dispatch(&mut enc_b, pl2, bg2, i_cnt);
-            }
-
-            // Pass 3a: wg_energy_buf (num_wg) → lvl1_buf (lvl1_count)
-            Self::encode_dispatch(
-                &mut enc_b,
-                self.pl_pass3.as_ref().unwrap(),
-                fb.bg_pass3a.as_ref().unwrap(),
-                num_wg,
-            );
-            // Pass 3b: lvl1_buf (lvl1_count) → lvl2_buf (lvl2_count)
-            Self::encode_dispatch(
-                &mut enc_b,
-                self.pl_pass3.as_ref().unwrap(),
-                fb.bg_pass3b.as_ref().unwrap(),
-                lvl1_count,
-            );
-            // Pass 3c: lvl2_buf (lvl2_count) → energy_total_buf (1)
-            // Always dispatched as 1 workgroup; count ≤ 64 for N ≤ 16_777_216.
-            Self::encode_dispatch(
-                &mut enc_b,
-                self.pl_pass3.as_ref().unwrap(),
-                fb.bg_pass3c.as_ref().unwrap(),
-                1,
-            );
-
-            // Verlet integration (optional).  Not yet chunked — the verlet
-            // shader uses its own `VerletParams` (not `GpuSimParams`) so
-            // extending it to chunked dispatch would require a parallel
-            // staging buffer.  For now emit an explicit error instead of
-            // letting wgpu panic deep inside Queue::submit.
-            if verlet.is_some() {
-                const MAX_VERLET_ATOMS: usize = 65_535 * 64; // 4_194_240
-                if n > MAX_VERLET_ATOMS {
-                    return Err(CreamError::InvalidInput(format!(
-                        "Verlet integration currently supports at most {MAX_VERLET_ATOMS} \
-                         atoms per step (N = {n} requested).  Split the simulation into \
-                         sub-steps or run without Verlet (compute forces only)."
-                    )));
-                }
-                Self::encode_dispatch(
-                    &mut enc_b,
-                    self.pl_verlet.as_ref().unwrap(),
-                    fb.bg_verlet.as_ref().unwrap(),
-                    n,
-                );
-            }
-
-            // Readbacks: forces (N × 16 B) + total energy (4 B) + virial partials.
-            enc_b.copy_buffer_to_buffer(
-                &fb.forces_buf,
-                0,
-                &fb.rb_forces,
-                0,
-                layout.output_stride_bytes * n as u64,
-            );
-            enc_b.copy_buffer_to_buffer(&fb.energy_total_buf, 0, &fb.rb_energy_total, 0, 4);
-            // Virial: 6 × f32 per workgroup, summed on CPU after readback.
-            // Transfer is tiny — at N = 10⁷, num_wg ≈ 1.6×10⁵ → ~3.75 MB,
-            // dwarfed by the force readback (≈ 160 MB for the same N).
             let virial_bytes = 4u64 * 6 * num_wg as u64;
-            enc_b.copy_buffer_to_buffer(
-                &fb.wg_virial_buf,
-                0,
-                &fb.rb_virial_partials,
-                0,
-                virial_bytes,
-            );
 
-            self.queue.submit([enc_b.finish()]);
+            // Verlet is not chunked (it uses VerletParams, not GpuSimParams).
+            // Guard here so the error fires regardless of which branch runs.
+            if verlet.is_some() && n > MAX_DISPATCH_ATOMS {
+                return Err(CreamError::InvalidInput(format!(
+                    "Verlet integration currently supports at most {MAX_DISPATCH_ATOMS} \
+                     atoms per step (N = {n} requested).  Split the simulation into \
+                     sub-steps or run without Verlet (compute forces only)."
+                )));
+            }
+
+            if n_chunks == 1 {
+                // ── Single-encoder path (N ≤ 4_194_240) ─────────────────────
+                if cellist_gpu {
+                    // pass0c: scatter atoms into Morton cells
+                    for c in 0..n_chunks {
+                        let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                        enc_b.copy_buffer_to_buffer(
+                            &chunk_staging, c as u64 * params_stride,
+                            &fb.params_buf, 0, params_stride,
+                        );
+                        Self::encode_dispatch(
+                            &mut enc_b,
+                            self.pl_pass0c.as_ref().unwrap(),
+                            fb.bg_pass0c.as_ref().unwrap(),
+                            i_cnt,
+                        );
+                    }
+                    // pass0d: reorder positions/types into Morton order
+                    for c in 0..n_chunks {
+                        let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                        enc_b.copy_buffer_to_buffer(
+                            &chunk_staging, c as u64 * params_stride,
+                            &fb.params_buf, 0, params_stride,
+                        );
+                        Self::encode_dispatch(
+                            &mut enc_b,
+                            self.pl_pass0d.as_ref().unwrap(),
+                            fb.bg_pass0d.as_ref().unwrap(),
+                            i_cnt,
+                        );
+                    }
+                }
+
+                // Pass 1 — density
+                for c in 0..n_chunks {
+                    let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                    enc_b.copy_buffer_to_buffer(
+                        &chunk_staging, c as u64 * params_stride,
+                        &fb.params_buf, 0, params_stride,
+                    );
+                    Self::encode_dispatch(&mut enc_b, pl1, bg1, i_cnt);
+                }
+
+                // Pass 2 — forces + per-WG energy partials
+                for c in 0..n_chunks {
+                    let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                    enc_b.copy_buffer_to_buffer(
+                        &chunk_staging, c as u64 * params_stride,
+                        &fb.params_buf, 0, params_stride,
+                    );
+                    Self::encode_dispatch(&mut enc_b, pl2, bg2, i_cnt);
+                }
+
+                // Pass 3a/b — GPU reduction; pass3c removed (CPU Neumaier sum).
+                Self::encode_dispatch(
+                    &mut enc_b, self.pl_pass3.as_ref().unwrap(),
+                    fb.bg_pass3a.as_ref().unwrap(), num_wg,
+                );
+                Self::encode_dispatch(
+                    &mut enc_b, self.pl_pass3.as_ref().unwrap(),
+                    fb.bg_pass3b.as_ref().unwrap(), lvl1_count,
+                );
+
+                // Verlet integration (optional; N ≤ MAX_DISPATCH_ATOMS guaranteed above)
+                if verlet.is_some() {
+                    Self::encode_dispatch(
+                        &mut enc_b,
+                        self.pl_verlet.as_ref().unwrap(),
+                        fb.bg_verlet.as_ref().unwrap(),
+                        n,
+                    );
+                }
+
+                // Readbacks: forces (N × 16 B) + lvl2 energy partials + virial partials.
+                enc_b.copy_buffer_to_buffer(
+                    &fb.forces_buf, 0, &fb.rb_forces, 0,
+                    layout.output_stride_bytes * n as u64,
+                );
+                enc_b.copy_buffer_to_buffer(
+                    &fb.lvl2_buf, 0, &fb.rb_lvl2, 0,
+                    4 * lvl2_count as u64,
+                );
+                // Virial: 6 × f32 per workgroup — tiny vs. force readback.
+                enc_b.copy_buffer_to_buffer(
+                    &fb.wg_virial_buf, 0, &fb.rb_virial_partials, 0, virial_bytes,
+                );
+
+                self.queue.submit([enc_b.finish()]);
+
+            } else {
+                // ── Per-chunk TDR-safe path (N > 4_194_240) ──────────────────
+                //
+                // enc_b currently holds only the debug-flag clear; flush it now
+                // so the GPU counter reset happens before any compute work.
+                self.queue.submit([enc_b.finish()]);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.device.poll(wgpu::Maintain::Wait);
+
+                if cellist_gpu {
+                    // pass0c — scatter atoms into Morton cells.
+                    // Atomic write cursors in write_offsets_buf accumulate across
+                    // submissions; chunks must therefore be strictly sequential.
+                    for c in 0..n_chunks {
+                        let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                        let mut enc = self.device.create_command_encoder(&Default::default());
+                        enc.copy_buffer_to_buffer(
+                            &chunk_staging, c as u64 * params_stride,
+                            &fb.params_buf, 0, params_stride,
+                        );
+                        Self::encode_dispatch(
+                            &mut enc,
+                            self.pl_pass0c.as_ref().unwrap(),
+                            fb.bg_pass0c.as_ref().unwrap(),
+                            i_cnt,
+                        );
+                        self.queue.submit([enc.finish()]);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.device.poll(wgpu::Maintain::Wait);
+                    }
+
+                    // pass0d — reorder positions/types into Morton order.
+                    // Reads sorted_atoms[] (complete after all pass0c polls above).
+                    // Each chunk writes reordered_pos[i_offset..i_offset+i_cnt];
+                    // ranges are non-overlapping so chunks are independent.
+                    for c in 0..n_chunks {
+                        let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                        let mut enc = self.device.create_command_encoder(&Default::default());
+                        enc.copy_buffer_to_buffer(
+                            &chunk_staging, c as u64 * params_stride,
+                            &fb.params_buf, 0, params_stride,
+                        );
+                        Self::encode_dispatch(
+                            &mut enc,
+                            self.pl_pass0d.as_ref().unwrap(),
+                            fb.bg_pass0d.as_ref().unwrap(),
+                            i_cnt,
+                        );
+                        self.queue.submit([enc.finish()]);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.device.poll(wgpu::Maintain::Wait);
+                    }
+                }
+
+                // pass1 — density accumulation.
+                // Each chunk writes densities[i_offset..i_offset+i_cnt] only.
+                // poll(Wait) after every chunk bounds GPU submission time.
+                // poll(Wait) after the LAST chunk commits all density values to
+                // GPU memory, satisfying the pass1→pass2 data dependency.
+                for c in 0..n_chunks {
+                    let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                    let mut enc = self.device.create_command_encoder(&Default::default());
+                    enc.copy_buffer_to_buffer(
+                        &chunk_staging, c as u64 * params_stride,
+                        &fb.params_buf, 0, params_stride,
+                    );
+                    Self::encode_dispatch(&mut enc, pl1, bg1, i_cnt);
+                    self.queue.submit([enc.finish()]);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.device.poll(wgpu::Maintain::Wait);
+                }
+
+                // pass2 — forces + per-WG energy partials.
+                // Each chunk writes forces[i_offset..] and
+                // wg_energy_buf[(i_offset/64)..]; non-overlapping ranges.
+                for c in 0..n_chunks {
+                    let i_cnt = (n - c * MAX_DISPATCH_ATOMS).min(MAX_DISPATCH_ATOMS);
+                    let mut enc = self.device.create_command_encoder(&Default::default());
+                    enc.copy_buffer_to_buffer(
+                        &chunk_staging, c as u64 * params_stride,
+                        &fb.params_buf, 0, params_stride,
+                    );
+                    Self::encode_dispatch(&mut enc, pl2, bg2, i_cnt);
+                    self.queue.submit([enc.finish()]);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.device.poll(wgpu::Maintain::Wait);
+                }
+
+                // pass3 + readbacks.
+                // wg_energy_buf is fully written after all pass2 polls above.
+                // This is the final encoder; it falls through to existing Poll 2.
+                {
+                    let mut enc = self.device.create_command_encoder(&Default::default());
+                    // pass3a/b — GPU reduction; final sum is CPU Neumaier.
+                    Self::encode_dispatch(
+                        &mut enc, self.pl_pass3.as_ref().unwrap(),
+                        fb.bg_pass3a.as_ref().unwrap(), num_wg,
+                    );
+                    Self::encode_dispatch(
+                        &mut enc, self.pl_pass3.as_ref().unwrap(),
+                        fb.bg_pass3b.as_ref().unwrap(), lvl1_count,
+                    );
+                    // Readbacks
+                    enc.copy_buffer_to_buffer(
+                        &fb.forces_buf, 0, &fb.rb_forces, 0,
+                        layout.output_stride_bytes * n as u64,
+                    );
+                    enc.copy_buffer_to_buffer(
+                        &fb.lvl2_buf, 0, &fb.rb_lvl2, 0,
+                        4 * lvl2_count as u64,
+                    );
+                    enc.copy_buffer_to_buffer(
+                        &fb.wg_virial_buf, 0, &fb.rb_virial_partials, 0, virial_bytes,
+                    );
+                    self.queue.submit([enc.finish()]);
+                }
+            }
         }
         self.pipeline_cache = pipeline_cache;
 
@@ -2006,7 +2104,7 @@ impl ComputeEngine {
 
         // ── Map readback buffers ─────────────────────────────────────────────
         {
-            // bit 0 = forces, bit 1 = energy_total, bit 2 = virial partials
+            // bit 0 = forces, bit 1 = lvl2 energy partials, bit 2 = virial partials
             let bits = Arc::new(AtomicU8::new(0));
             let b0 = bits.clone();
             fb.rb_forces
@@ -2014,9 +2112,10 @@ impl ComputeEngine {
                 .map_async(wgpu::MapMode::Read, move |_| {
                     b0.fetch_or(0b001, Ordering::Release);
                 });
+            // Map only the populated portion: lvl2_count × 4 B.
             let b1 = bits.clone();
-            fb.rb_energy_total
-                .slice(..)
+            fb.rb_lvl2
+                .slice(..4 * lvl2_count as u64)
                 .map_async(wgpu::MapMode::Read, move |_| {
                     b1.fetch_or(0b010, Ordering::Release);
                 });
@@ -2043,7 +2142,8 @@ impl ComputeEngine {
         }
 
         let forces = Self::read_forces(&fb.rb_forces, n)?;
-        let energy = Self::read_f32_scalar(&fb.rb_energy_total)?;
+        // Neumaier-compensated CPU sum of lvl2_count GPU partials.
+        let energy = Self::read_and_sum_lvl2(&fb.rb_lvl2, lvl2_count)?;
         // Virial: read `6 × num_wg` f32 partials and compute `W = Σ partials`
         // with Neumaier-compensated summation per component (f64 target).
         // Then `σ = −W / V` for PBC systems; zeros for clusters.
@@ -2299,7 +2399,7 @@ impl ComputeEngine {
         n: usize,
         layout: &crate::potential::BufferLayout,
     ) -> FrameBuffers {
-        // 4-level reduction sizes (all ≥ 1)
+        // 3-level GPU reduction sizes (all ≥ 1); CPU handles the final sum.
         let num_wg = n.div_ceil(64).max(1);
         let lvl1 = num_wg.div_ceil(64).max(1);
         let lvl2 = lvl1.div_ceil(64).max(1);
@@ -2317,7 +2417,6 @@ impl ComputeEngine {
             wg_energy_buf: Self::alloc_storage(device, 4 * num_wg as u64),
             lvl1_buf: Self::alloc_storage(device, 4 * lvl1 as u64),
             lvl2_buf: Self::alloc_storage(device, 4 * lvl2 as u64),
-            energy_total_buf: Self::alloc_storage(device, 4),
             wg_virial_buf: Self::alloc_storage(device, virial_bytes),
             rb_virial_partials: Self::alloc_readback(device, virial_bytes),
             reduce_params_a_buf: Self::alloc_uniform_bytes(
@@ -2328,17 +2427,15 @@ impl ComputeEngine {
                 device,
                 std::mem::size_of::<ReduceParams>(),
             ),
-            reduce_params_c_buf: Self::alloc_uniform_bytes(
-                device,
-                std::mem::size_of::<ReduceParams>(),
-            ),
             velocities_buf: Self::alloc_storage_init(device, &vec![[0f32; 4]; n]),
             verlet_params_buf: Self::alloc_uniform_bytes(
                 device,
                 std::mem::size_of::<VerletParams>(),
             ),
             rb_forces: Self::alloc_readback(device, layout.output_stride_bytes * n as u64),
-            rb_energy_total: Self::alloc_readback(device, 4),
+            // lvl2 readback: sized to the maximum possible lvl2 count for this N.
+            // CPU Neumaier sum reads exactly lvl2_count (≤ lvl2) elements each call.
+            rb_lvl2: Self::alloc_readback(device, 4 * lvl2 as u64),
             bg_pass0a: None,
             bg_pass0b: None,
             bg_pass0c: None,
@@ -2347,7 +2444,6 @@ impl ComputeEngine {
             bg_pass2: None,
             bg_pass3a: None,
             bg_pass3b: None,
-            bg_pass3c: None,
             bg_verlet: None,
             cell_list: None,
             neighbor_list: None,
@@ -2763,13 +2859,48 @@ impl ComputeEngine {
         Ok(forces)
     }
 
-    fn read_f32_scalar(buf: &wgpu::Buffer) -> Result<f32, CreamError> {
-        let slice = buf.slice(..);
+    /// Read `lvl2_count` f32 values from the lvl2 GPU reduction buffer and
+    /// sum them with Neumaier-compensated summation (f64 accumulator).
+    ///
+    /// This replaces the former GPU pass3c (single-workgroup reduction) which
+    /// silently dropped elements when `lvl2_count > 64` (N > 16_777_216),
+    /// causing ~0.4 % energy under-estimation at N ≈ 23 M.
+    ///
+    /// `lvl2_count = ceil(ceil(N/64)/64)/64)` — fewer than 400 values for
+    /// N ≤ 100 M — so the CPU cost is negligible (< 1 µs on modern hardware).
+    ///
+    /// Neumaier (improved Kahan) is chosen over plain summation because the
+    /// lvl2 partials each represent ~262 K atoms and can span several orders
+    /// of magnitude in heterogeneous systems, making catastrophic cancellation
+    /// a real risk for near-equilibrium configurations.
+    fn read_and_sum_lvl2(buf: &wgpu::Buffer, lvl2_count: usize) -> Result<f32, CreamError> {
+        let nbytes = 4 * lvl2_count as u64;
+        let slice = buf.slice(..nbytes);
         let mapped = slice.get_mapped_range();
-        let v = bytemuck::cast_slice::<_, f32>(&mapped)[0];
+        let partials: &[f32] = bytemuck::cast_slice(&mapped);
+
+        // Neumaier-compensated sum with f64 accumulator.
+        // Each partial is widened to f64 before accumulation so that the
+        // compensation term itself does not lose low-order bits.
+        let mut sum  = 0.0f64;
+        let mut comp = 0.0f64;
+        for &v in partials {
+            let x = v as f64;
+            let t = sum + x;
+            // Capture the rounding error lost in `t`.
+            if sum.abs() >= x.abs() {
+                comp += (sum - t) + x;
+            } else {
+                comp += (x - t) + sum;
+            }
+            sum = t;
+        }
+
         drop(mapped);
         buf.unmap();
-        Ok(v)
+        // Cast back to f32: the GPU pipeline is f32 throughout, so the result
+        // cannot be more precise than f32 regardless of the accumulator width.
+        Ok((sum + comp) as f32)
     }
 
     /// Read the `6 × num_wg` per-workgroup virial partials, sum them with

@@ -48,8 +48,14 @@ const AP_MAX_ATOMS: usize = 50_000;
 /// Tolerance for CPU vs GPU force equivalence checks.
 const FORCE_TOLERANCE: f32 = 1e-5;
 
-/// Tolerance used in the crystal-system scaling benchmark
+/// Tolerance for max |F_gpu − F_cpu| in the crystal scaling benchmark.
 const CRYSTAL_TOLERANCE: f32 = 1e-3;
+
+/// Tolerance for relative energy error in the crystal scaling benchmark:
+///   |E_gpu − E_cpu| / |E_cpu|.max(1e-10)
+/// GPU uses Neumaier/f64 accumulation; CPU uses plain f32 sum, so a small
+/// asymmetry is expected at larger N — 1e-4 gives comfortable headroom.
+const CRYSTAL_ENERGY_REL_TOL: f32 = 1e-4;
 
 /// Upper bound on atom count for the crystal scaling section.
 const CRYSTAL_MAX_ATOMS: usize = 5_000_000;
@@ -488,16 +494,19 @@ fn crystal_supercell(
 
 // ── Crystal scaling benchmark helpers ────────────────────────────────────────
 
-/// Steady-state GPU-CL median + force results for correctness comparison.
+/// Steady-state GPU-CL median + force/energy results for correctness comparison.
 ///
-/// Returns `(first_call, median_steady, forces)`.
+/// Returns `(first_call, median_steady, forces, energy)`.
+/// Both `forces` and `energy` come from the first call (post-compile); the
+/// computation is deterministic so these equal any subsequent steady-state
+/// result for the same input.
 fn crystal_gpu_cl(
     engine: &mut ComputeEngine,
     pot: &EamPotential,
     pos: &[[f32; 4]],
     types: &[u32],
     cell: [[f32; 3]; 3],
-) -> (Duration, Duration, Vec<[f32; 3]>) {
+) -> (Duration, Duration, Vec<[f32; 3]>, f32) {
     // First call — pipeline compile
     let t0 = Instant::now();
     let first_res = engine
@@ -524,7 +533,7 @@ fn crystal_gpu_cl(
         .collect();
     samples.sort_unstable();
 
-    (first, samples[samples.len() / 2], first_res.forces)
+    (first, samples[samples.len() / 2], first_res.forces, first_res.energy)
 }
 
 // ── Main crystal benchmark driver ─────────────────────────────────────────────
@@ -545,7 +554,7 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
         4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 25, 30, 35, 40, 50, 75, 100,
     ];
 
-    let col_w = 95;
+    let col_w = 110;
     let sep = "─".repeat(col_w);
 
     println!("\n{}", "═".repeat(col_w));
@@ -557,14 +566,14 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
     );
     println!(
         "  Warm: {} iters | Measure: {} iters (median) | \
-         Force tolerance: {:.0e}",
-        WARM_ITERS, MEASURE_ITERS, CRYSTAL_TOLERANCE
+         Force tol: {:.0e} | Energy rel tol: {:.0e}",
+        WARM_ITERS, MEASURE_ITERS, CRYSTAL_TOLERANCE, CRYSTAL_ENERGY_REL_TOL
     );
     println!("{}", "═".repeat(col_w));
 
     println!(
-        "\n{:<14} {:>7}  {:>12}  {:>12}  {:>8}  {:>10}  {}",
-        "System", "N", "CPU-CL med", "GPU-CL med", "Speedup", "MaxForceErr", "Status"
+        "\n{:<14} {:>7}  {:>12}  {:>12}  {:>8}  {:>10}  {:>12}  {}",
+        "System", "N", "CPU-CL med", "GPU-CL med", "Speedup", "MaxForceErr", "EnergyRelErr", "Status"
     );
     println!("{sep}");
 
@@ -586,24 +595,21 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
             let (pos, types, cell) = crystal_supercell(system, rep);
 
             // ── CPU-CL reference ──────────────────────────────────────────
-            // Also captures forces for correctness comparison.
+            // Captures forces AND energy for correctness comparison.
             let cpu_probe = cpu.compute_cell_list_sync(&pos, &types, Some(cell), pot);
-            let cpu_forces = match cpu_probe {
+            let (cpu_forces, cpu_energy) = match cpu_probe {
                 Err(_) => {
                     // Box too small for minimum-image convention — skip this rep
                     println!(
-                        "{:<14} {:>7}  {:>12}  {:>12}  {:>8}  {:>10}  SKIP (box too small)",
+                        "{:<14} {:>7}  {:>12}  {:>12}  {:>8}  {:>10}  {:>12}  SKIP (box too small)",
                         system.name(),
                         n,
-                        "—",
-                        "—",
-                        "—",
-                        "—"
+                        "—", "—", "—", "—", "—"
                     );
                     skipped += 1;
                     continue;
                 }
-                Ok(r) => r.forces,
+                Ok(r) => (r.forces, r.energy),
             };
 
             // Warm-up + steady median for CPU
@@ -630,10 +636,10 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
             }))
             .expect("GPU CellList engine init failed");
 
-            let (_gpu_first, gpu_med, gpu_forces) =
+            let (_gpu_first, gpu_med, gpu_forces, gpu_energy) =
                 crystal_gpu_cl(&mut gpu_eng, pot, &pos, &types, cell);
 
-            // ── Correctness check ─────────────────────────────────────────
+            // ── Correctness check — forces ────────────────────────────────
             let max_err = cpu_forces
                 .iter()
                 .zip(gpu_forces.iter())
@@ -646,7 +652,15 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
                 })
                 .fold(0.0f32, f32::max);
 
-            let status = if max_err < CRYSTAL_TOLERANCE {
+            // ── Correctness check — energy ────────────────────────────────
+            // Relative error: |ΔE| / |E_cpu|, guarded against zero denominator.
+            // GPU uses Neumaier/f64; CPU uses plain f32 sequential sum, so a
+            // small residual (~1–2 ULP × N) is expected for large N.
+            let energy_rel_err =
+                (gpu_energy - cpu_energy).abs() / cpu_energy.abs().max(1e-10_f32);
+
+            let status = if max_err < CRYSTAL_TOLERANCE && energy_rel_err < CRYSTAL_ENERGY_REL_TOL
+            {
                 passed += 1;
                 "PASS"
             } else {
@@ -656,13 +670,14 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
             let speedup = cpu_med.as_secs_f64() / gpu_med.as_secs_f64();
 
             println!(
-                "{:<14} {:>7}  {:>12}  {:>12}  {:>7.2}x  {:>10.3e}  {}",
+                "{:<14} {:>7}  {:>12}  {:>12}  {:>7.2}x  {:>10.3e}  {:>12.3e}  {}",
                 system.name(),
                 n,
                 fmt_dur(cpu_med),
                 fmt_dur(gpu_med),
                 speedup,
                 max_err,
+                energy_rel_err,
                 status,
             );
         }
@@ -676,10 +691,10 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
     println!("  Crystal Benchmark Summary");
     println!("{}", "═".repeat(col_w));
     println!(
-        "{:<14}  {:>7}  {:>7}  {:>7}  {:>7}",
+        "{:<14}  {:>7}  {:>7}  {:>8}  {:>7}",
         "System", "Total", "PASS", "MISMATCH", "SKIP"
     );
-    println!("{}", "─".repeat(50));
+    println!("{}", "─".repeat(55));
 
     let mut grand_total = 0usize;
     let mut grand_pass = 0usize;
@@ -688,7 +703,7 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
     for (name, total, passed, skipped) in &summary {
         let mismatch = total - passed - skipped;
         println!(
-            "{:<14}  {:>7}  {:>7}  {:>7}  {:>7}",
+            "{:<14}  {:>7}  {:>7}  {:>8}  {:>7}",
             name, total, passed, mismatch, skipped
         );
         grand_total += total;
@@ -696,10 +711,10 @@ fn bench_crystal_systems(pot: &EamPotential, cpu: &CpuEngine) {
         grand_skip += skipped;
     }
 
-    println!("{}", "─".repeat(50));
+    println!("{}", "─".repeat(55));
     let grand_mismatch = grand_total - grand_pass - grand_skip;
     println!(
-        "{:<14}  {:>7}  {:>7}  {:>7}  {:>7}",
+        "{:<14}  {:>7}  {:>7}  {:>8}  {:>7}",
         "TOTAL", grand_total, grand_pass, grand_mismatch, grand_skip
     );
     println!("{}", "═".repeat(col_w));

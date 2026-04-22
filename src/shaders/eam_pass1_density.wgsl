@@ -23,7 +23,7 @@
 //   Inactive threads (i >= n_atoms) still participate in tile loads; their
 //   outputs are suppressed by the `if is_active` guard on the final write.
 //
-// Kahan compensated summation suppresses f32 round-off accumulation.
+// Neumaier compensated summation suppresses f32 round-off accumulation.
 // =============================================================================
 
 var<workgroup> tile_pos  : array<vec4<f32>, 64>;
@@ -44,7 +44,7 @@ fn main(
     let si   = select(0u, i, is_active);
     let pos_i = positions[si].xyz;
 
-    // Kahan compensated sum for ρᵢ
+    // Neumaier compensated sum for ρᵢ
     var rho: f32 = 0.0;
     var kc:  f32 = 0.0;
 
@@ -72,11 +72,12 @@ fn main(
                 let r_sq = dot(dv, dv);
 
                 if r_sq < params.cutoff_sq && r_sq > MIN_R_SQ {
-                    let r  = sqrt(r_sq);
-                    let y  = lookup_by_r(tbl.rho_offset, tile_type[tj], r) - kc;
-                    let s  = rho + y;
-                    kc     = (s - rho) - y;
-                    rho    = s;
+                    let r    = sqrt(r_sq);
+                    let _val = lookup_by_r(tbl.rho_offset, tile_type[tj], r);
+                    let s    = rho + _val;
+                    if abs(rho) >= abs(_val) { kc += (rho - s) + _val; }
+                    else                     { kc += (_val - s) + rho; }
+                    rho = s;
                 }
             }
         }
@@ -86,6 +87,6 @@ fn main(
     }
 
     if is_active {
-        densities[i] = rho;
+        densities[i] = rho + kc;
     }
 }

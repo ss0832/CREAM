@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "eam-cream-python"
-version = "0.1.0"
+version = "0.1.1"
 description = "Compute-shader Rust EAM Atomistics — GPU-accelerated molecular dynamics force engine"
 requires-python = ">=3.9"
 authors = [{ name = "ss0832", email = "highlighty876@gmail.com" }]

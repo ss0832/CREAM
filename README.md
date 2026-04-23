@@ -1,5 +1,7 @@
 # CREAM — Compute-shader Rust EAM Atomistics
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19708613.svg)](https://doi.org/10.5281/zenodo.19708613)
+
 GPU-accelerated molecular-dynamics force engine based on the Embedded Atom
 Method (EAM). CREAM takes atomic coordinates, element types, and an EAM
 potential, and returns energies and forces. It supports multi-element alloys

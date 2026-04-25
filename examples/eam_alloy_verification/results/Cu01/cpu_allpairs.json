@@ -1,0 +1,16 @@
+{
+  "potential": "Cu01.eam.alloy",
+  "mode": "cpu_allpairs",
+  "suite": "elemental",
+  "summary": {
+    "n_cases": 13,
+    "n_evaluated": 13,
+    "n_passed": 13,
+    "n_failed": 0,
+    "n_skipped": 0,
+    "max_abs_energy_error_eV_per_atom": 7.800436940819111e-7,
+    "max_abs_force_error_eV_per_A": 1.761913952927352e-4,
+    "max_rms_force_error_eV_per_A": 5.420052246556269e-5,
+    "max_abs_stress_error_GPa": 5.976904465414982e-3
+  }
+}

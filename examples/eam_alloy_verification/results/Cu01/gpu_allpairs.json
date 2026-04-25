@@ -1,0 +1,16 @@
+{
+  "potential": "Cu01.eam.alloy",
+  "mode": "gpu_allpairs",
+  "suite": "elemental",
+  "summary": {
+    "n_cases": 13,
+    "n_evaluated": 13,
+    "n_passed": 13,
+    "n_failed": 0,
+    "n_skipped": 0,
+    "max_abs_energy_error_eV_per_atom": 7.800436940819111e-7,
+    "max_abs_force_error_eV_per_A": 1.7623609877631674e-4,
+    "max_rms_force_error_eV_per_A": 5.4213975010544033e-5,
+    "max_abs_stress_error_GPa": 5.985855136640303e-3
+  }
+}

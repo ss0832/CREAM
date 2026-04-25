@@ -1,0 +1,24 @@
+{
+  "potential": "Mishin-Ni-Al-2009.eam.alloy",
+  "mode": "cpu_allpairs",
+  "suite": "binary",
+  "tolerances": {
+    "energy_per_atom_eV": 2.0e-6,
+    "force_max_eV_per_A": 3.0e-4,
+    "force_rms_eV_per_A": 1.0e-4,
+    "stress_max_eV_per_A3": 2.0e-3,
+    "stress_rms_eV_per_A3": 1.0e-3
+  },
+  "summary": {
+    "n_cases": 22,
+    "n_evaluated": 22,
+    "n_passed": 22,
+    "n_failed": 0,
+    "n_skipped": 0,
+    "max_abs_energy_error_eV_per_atom": 1.1022399641902325e-6,
+    "max_abs_force_error_eV_per_A": 1.785218874919836e-4,
+    "max_rms_force_error_eV_per_A": 5.205897354796277e-5,
+    "max_abs_stress_error_eV_per_A3": 4.473067621751925e-5,
+    "max_abs_stress_error_GPa": 7.166644366828391e-3
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "date": "2026-04-25",
+  "description": "CREAM EAM/alloy external Python reference verification summary",
+  "potentials": {
+    "Cu01.eam.alloy": {
+      "elements": ["Cu"],
+      "cutoff_A": 5.506786,
+      "suite": "elemental",
+      "cases": 13,
+      "backend_matrix": {
+        "cpu_allpairs": {
+          "evaluated": 13,
+          "passed": 13,
+          "failed": 0,
+          "skipped": 0,
+          "max_abs_energy_error_eV_per_atom": 7.800436940819111e-7,
+          "max_abs_force_error_eV_per_A": 1.761913952927352e-4,
+          "max_rms_force_error_eV_per_A": 5.420052246556269e-5,
+          "max_abs_stress_error_GPa": 5.976904465414982e-3
+        },
+        "cpu_celllist": {
+          "evaluated": 10,
+          "passed": 10,
+          "failed": 0,
+          "skipped": 3,
+          "max_abs_energy_error_eV_per_atom": 6.608344045311298e-7,
+          "max_abs_force_error_eV_per_A": 1.768470463852645e-4,
+          "max_rms_force_error_eV_per_A": 5.441190831482334e-5,
+          "max_abs_stress_error_GPa": 5.9938608940507745e-3
+        },
+        "gpu_allpairs": {
+          "evaluated": 13,
+          "passed": 13,
+          "failed": 0,
+          "skipped": 0,
+          "max_abs_energy_error_eV_per_atom": 7.800436940819111e-7,
+          "max_abs_force_error_eV_per_A": 1.7623609877631674e-4,
+          "max_rms_force_error_eV_per_A": 5.4213975010544033e-5,
+          "max_abs_stress_error_GPa": 5.985855136640303e-3
+        },
+        "gpu_celllist": {
+          "evaluated": 10,
+          "passed": 10,
+          "failed": 0,
+          "skipped": 3,
+          "max_abs_energy_error_eV_per_atom": 7.800436940819111e-7,
+          "max_abs_force_error_eV_per_A": 1.7620629645392905e-4,
+          "max_rms_force_error_eV_per_A": 5.4214851388382036e-5,
+          "max_abs_stress_error_GPa": 5.98540968466621e-3
+        }
+      }
+    },
+    "Mishin-Ni-Al-2009.eam.alloy": {
+      "elements": ["Ni", "Al"],
+      "cutoff_A": 6.28721,
+      "suite": "binary",
+      "cases": 22,
+      "backend_matrix": {
+        "cpu_allpairs": {
+          "evaluated": 22,
+          "passed": 22,
+          "failed": 0,
+          "skipped": 0,
+          "atol_energy_per_atom_eV": 2.0e-6,
+          "max_abs_energy_error_eV_per_atom": 1.1022399641902325e-6,
+          "max_abs_force_error_eV_per_A": 1.785218874919836e-4,
+          "max_rms_force_error_eV_per_A": 5.205897354796277e-5,
+          "max_abs_stress_error_eV_per_A3": 4.473067621751925e-5,
+          "max_abs_stress_error_GPa": 7.166644366828391e-3
+        }
+      }
+    }
+  }
+}

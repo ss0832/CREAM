@@ -441,6 +441,46 @@ cream/
 └── rust-toolchain.toml
 ```
 
+## References
+
+### ASE
+
+- A. H. Larsen, J. J. Mortensen, J. Blomqvist, I. E. Castelli, R. Christensen, M. Dułak, J. Friis, M. N. Groves, B. Hammer, C. Hargus, E. D. Hermes, P. C. Jennings, P. B. Jensen, J. Kermode, J. R. Kitchin, E. L. Kolsbjerg, J. Kubal, K. Kaasbjerg, S. Lysgaard, J. B. Maronsson, T. Maxson, T. Olsen, L. Pastewka, A. Peterson, C. Rostgaard, J. Schiøtz, O. Schütt, M. Strange, K. S. Thygesen, T. Vegge, L. Vilhelmsen, M. Walter, Z. Zeng, and K. W. Jacobsen,  
+  "The atomic simulation environment — a Python library for working with atoms,"  
+  *J. Phys.: Condens. Matter* **29**, 273002 (2017).  
+  DOI: [10.1088/1361-648X/aa680e](https://doi.org/10.1088/1361-648X/aa680e)
+
+- S. R. Bahn and K. W. Jacobsen,  
+  "An object-oriented scripting interface to a legacy electronic structure code,"  
+  *Comput. Sci. Eng.* **4**, 56–66 (2002).  
+  DOI: [10.1109/5992.998641](https://doi.org/10.1109/5992.998641)
+
+### Embedded Atom Method (EAM)
+
+- M. S. Daw and M. I. Baskes,  
+  "Embedded-atom method: Derivation and application to impurities, surfaces, and other defects in metals,"  
+  *Phys. Rev. B* **29**, 6443–6453 (1984).  
+  DOI: [10.1103/PhysRevB.29.6443](https://doi.org/10.1103/PhysRevB.29.6443)
+
+- S. M. Foiles, M. I. Baskes, and M. S. Daw,  
+  "Embedded-atom-method functions for the fcc metals Cu, Ag, Au, Ni, Pd, Pt, and their alloys,"  
+  *Phys. Rev. B* **33**, 7983–7991 (1986).  
+  DOI: [10.1103/PhysRevB.33.7983](https://doi.org/10.1103/PhysRevB.33.7983)
+
+- M. S. Daw, S. M. Foiles, and M. I. Baskes,  
+  "The embedded-atom method: a review of theory and applications,"  
+  *Mater. Sci. Rep.* **9**, 251–310 (1993).  
+  DOI: [10.1016/0920-2307(93)90001-U](https://doi.org/10.1016/0920-2307(93)90001-U)
+
+### EAM potential files used in examples and benchmarks
+
+- Y. Mishin, M. J. Mehl, and D. A. Papaconstantopoulos,  
+  "Embedded-atom potential for B2-NiAl,"  
+  *Phys. Rev. B* **65**, 224114 (2002).  
+  DOI: [10.1103/PhysRevB.65.224114](https://doi.org/10.1103/PhysRevB.65.224114)
+
+---
+
 ## License
 
 CREAM is **dual-licensed**. The Rust engine, PyO3 bindings, WGSL shaders,
